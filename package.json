@@ -3,12 +3,17 @@
   "displayName": "Chunk Stage",
   "description": "Stage or unstage just the lines you selected, including in brand-new files. Undo with ⌘Z.",
   "version": "0.1.0",
-  "publisher": "arpit-jain",
+  "publisher": "arpitjp",
+  "license": "MIT",
   "icon": "images/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/arpitjp/chunk-stage.git"
   },
+  "bugs": {
+    "url": "https://github.com/arpitjp/chunk-stage/issues"
+  },
+  "homepage": "https://github.com/arpitjp/chunk-stage#readme",
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -149,7 +154,7 @@
     "build:icon": "node scripts/build-icon-font.js",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test out/test/*.test.js",
-    "package": "vsce package --skip-license"
+    "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "^18.19.0",
