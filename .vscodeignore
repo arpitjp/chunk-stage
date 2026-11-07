@@ -6,3 +6,5 @@ out/test/**
 tsconfig.json
 .gitignore
 node_modules/**
+companion/**
+out-companion/**

@@ -1,14 +1,19 @@
 import {
+  Change,
   FileDiff,
   LineRange,
   Piece,
   blankNeighbours,
+  computeChanges,
+  isTrivialChange,
   mapRange,
   mapRangeToOld,
   renderPieces,
   selectChanges,
   selectPieces,
+  splitLines,
   summarize,
+  wholeChange,
 } from './diff';
 import { StageableState } from './git';
 
@@ -46,8 +51,10 @@ export interface Plan {
 /**
  * What staging or unstaging `ranges` (editor lines) would do, or undefined if
  * nothing. When staging, blank lines around the selection come along, but only
- * when the selection itself has changes, and they don't count towards
- * `added`/`removed`. Unstaging takes exactly the selected lines.
+ * when the selection itself has changes; they don't count towards
+ * `added`/`removed` and aren't part of `lines`. A stage that would leave only
+ * blank-line or final-newline changes behind stages those too. Unstaging takes
+ * exactly the selected lines.
  */
 export function planFor(snapshot: Snapshot, action: Action, ranges: LineRange[]): Plan | undefined {
   const { unstaged, staged } = snapshot;
@@ -57,13 +64,9 @@ export function planFor(snapshot: Snapshot, action: Action, ranges: LineRange[])
       return undefined;
     }
     const blanks = blankNeighbours(unstaged.newLines, unstaged.changes, ranges, 'new');
-    const { pieces, lines, gaps } = selectChanges(
-      unstaged.changes,
-      [...ranges, ...blanks],
-      'new',
-      unstaged.newLines.length,
-      ranges,
-    );
+    const snapped = selectPieces(unstaged.changes, [...ranges, ...blanks], 'new', unstaged.newLines.length, ranges);
+    const pieces = leavesOnlyTrivia(unstaged, snapped) ? unstaged.changes.map(wholeChange) : snapped;
+    const { lines, gaps } = selectChanges(unstaged.changes, ranges, 'new', unstaged.newLines.length);
     const { added, removed } = summarize(selected);
     return { action, diff: unstaged, pieces, added, removed, lines, gaps };
   }
@@ -89,6 +92,18 @@ export function planFor(snapshot: Snapshot, action: Action, ranges: LineRange[])
     lines: selection.lines.map(toEditor).filter((r) => r.end >= r.start),
     gaps: selection.gaps.map((gap) => toEditor({ start: gap, end: gap }).start),
   };
+}
+
+/** Whether applying `pieces` leaves differences, all of them trivial. */
+function leavesOnlyTrivia(diff: FileDiff, pieces: Piece[]): boolean {
+  // Cheap check first: a real change that no piece even touches stays behind.
+  const touched = (change: Change) =>
+    pieces.some((p) => p.oldIndex >= change.oldIndex && p.oldIndex <= change.oldIndex + change.oldLines.length);
+  if (!diff.changes.every((change) => isTrivialChange(change) || touched(change))) {
+    return false;
+  }
+  const remaining = computeChanges(splitLines(renderPieces(diff, pieces)), diff.newLines);
+  return remaining.length > 0 && remaining.every(isTrivialChange);
 }
 
 export interface IndexContent {

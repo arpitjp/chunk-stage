@@ -26,7 +26,9 @@ export interface GitExtensionBridge {
   relativePath(uri: vscode.Uri): string | undefined;
   /**
    * Has the git extension set the file's index content. Its own writes refresh
-   * the editor's gutter right away. Resolves before the write is done.
+   * the editor's gutter right away. Settles only after the git extension has
+   * refreshed its views, which runs a full `git status` and can take far longer
+   * than the write itself.
    */
   stage(uri: vscode.Uri, text: string): Thenable<unknown>;
   /** Asks the git extension to refresh its views after a write made by us. */
@@ -57,7 +59,10 @@ export class ChangeTracker implements vscode.Disposable {
   private readonly states = new Map<string, Promise<FileState>>();
   private readonly blobs = new Map<string, Promise<Blob>>();
   private readonly stagedDiffs = new WeakMap<FileState, Promise<FileDiff | undefined>>();
-  private readonly diffs = new Map<string, { version: number; state: FileState; result: DiffResult }>();
+  private readonly diffs = new Map<
+    string,
+    { version: number; state: FileState; statePromise: Promise<FileState>; result: DiffResult }
+  >();
   private readonly changeEmitter = new vscode.EventEmitter<void>();
   private readonly externalEmitter = new vscode.EventEmitter<string>();
   /** Files with a write in flight; their cached state is ahead of git on purpose. */
@@ -81,14 +86,27 @@ export class ChangeTracker implements vscode.Disposable {
       return { ok: false, reason: doc.isUntitled ? 'Save the file first.' : 'Only files on disk can be staged.' };
     }
     const key = doc.uri.fsPath;
-    const state = await this.getState(key);
+    const statePromise = this.getState(key);
+    const state = await statePromise;
     const cached = this.diffs.get(key);
     if (cached && cached.state === state && cached.version === doc.version) {
       return cached.result;
     }
     const result = await this.computeDiff(doc, state);
-    this.diffs.set(key, { version: result.ok ? result.version : doc.version, state, result });
+    if (this.states.get(key) === statePromise) {
+      this.diffs.set(key, { version: result.ok ? result.version : doc.version, state, statePromise, result });
+    }
     return result;
+  }
+
+  /** What `apply` would do, if that is already known without waiting for git. */
+  peekPlan(doc: vscode.TextDocument, action: Action, ranges: LineRange[]): Plan | undefined {
+    const key = doc.uri.fsPath;
+    const cached = this.diffs.get(key);
+    if (!cached || cached.version !== doc.version || cached.statePromise !== this.states.get(key) || !cached.result.ok) {
+      return undefined;
+    }
+    return planFor(cached.result, action, ranges);
   }
 
   /**
@@ -112,14 +130,14 @@ export class ChangeTracker implements vscode.Disposable {
       if (!plan) {
         return { kind: 'nothing' };
       }
+      // Show the outcome right away; git (and the network to a remote host) can take a moment.
+      onWillWrite?.(plan);
       const content = indexContent(result, plan);
       const predicted = content
         ? { mode: await this.git.modeFor(result.state), sha: blobId(content.bytes) }
         : null;
       const key = doc.uri.fsPath;
       this.writing.add(key);
-      // Show the outcome right away; git (and the network to a remote host) can take a moment.
-      onWillWrite?.(plan);
       this.adopt(doc.uri, result.state, predicted, content?.bytes ?? null);
       try {
         const { viaGitExtension, ...transition } = await this.write(doc.uri, result.state, content);
@@ -153,8 +171,7 @@ export class ChangeTracker implements vscode.Disposable {
       const text = next && previous ? await this.textForGitExtension(uri, previous, next) : undefined;
       if (text !== undefined) {
         await this.git.expectEntry(location, expected);
-        await this.bridge?.stage(uri, text);
-        entry = await this.git.waitForEntry(location, (e) => e !== null && e.sha !== expected?.sha);
+        entry = await this.stageViaGitExtension(uri, location, text, expected);
       } else {
         await this.git.replaceIndexEntry(location, expected, next);
         this.bridge?.refresh(uri);
@@ -261,13 +278,30 @@ export class ChangeTracker implements vscode.Disposable {
     const before: BlobRef | null = state.kind === 'tracked' ? { mode: state.mode, sha: state.sha } : null;
     if (content && this.canUseGitExtension(uri, state, content.bytes, await this.git.modeFor(state))) {
       await this.git.expectEntry(state, before);
-      await this.bridge?.stage(uri, content.text);
-      const after = await this.git.waitForEntry(state, (e) => e !== null && e.sha !== before?.sha);
+      const after = await this.stageViaGitExtension(uri, state, content.text, before);
       return { before, after, viaGitExtension: true };
     }
     const transition = await this.git.writeIndex(state, content?.bytes ?? null);
     this.bridge?.refresh(uri);
     return { ...transition, viaGitExtension: false };
+  }
+
+  /**
+   * Has the git extension stage `text` and resolves with the new index entry
+   * as soon as it lands, without waiting for the git extension's refresh.
+   */
+  private stageViaGitExtension(uri: vscode.Uri, location: InRepo, text: string, before: BlobRef | null): Promise<BlobRef | null> {
+    const stopPolling = new AbortController();
+    const call = Promise.resolve(this.bridge?.stage(uri, text));
+    const failed = call.then(
+      () => new Promise<never>(() => undefined),
+      (err: unknown) => {
+        stopPolling.abort();
+        throw err;
+      },
+    );
+    const landed = this.git.waitForEntry(location, (e) => e !== null && e.sha !== before?.sha, { signal: stopPolling.signal });
+    return Promise.race([landed, failed]);
   }
 
   /**

@@ -2,8 +2,19 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { LineRange } from './diff';
 import { Git } from './git';
+import { ChangeHighlight, Flash, selectedRanges } from './highlight';
 import { StageHistory } from './history';
-import { Action, Plan, formatCounts, planFor } from './plan';
+import { StatsPanel, StatsStore } from './statsView';
+import { Action, Plan, Snapshot, formatCounts, planFor } from './plan';
+import {
+  ApplyRequest,
+  ApplyResponse,
+  COMPANION_APPLY_COMMANDS,
+  COMPANION_SNAPSHOT_COMMAND,
+  FileSnapshot,
+  MAIN_APPLY_COMMAND,
+  MAIN_HELLO_COMMAND,
+} from './protocol';
 import { ChangeTracker, GitExtensionBridge, errorMessage } from './tracker';
 
 /** The parts of the built-in git extension API (`vscode.git`) used here. */
@@ -37,27 +48,40 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const bridge = gitApi && (await createBridge(gitApi, log));
   const tracker = new ChangeTracker(new Git(gitApi?.git.path ?? configuredGitPath()), log, bridge);
   const history = new StageHistory();
-  const status = new SelectionStatus(tracker);
+  const stats = new StatsStore(context.globalState);
+  const statsPanel = new StatsPanel(stats);
+  const companion = await CompanionLink.connect();
+  const status = new SelectionStatus(tracker, companion);
   const highlight = new ChangeHighlight();
   const refreshSoon = debounce(() => void tracker.refresh(), 300);
   // Index writes and undo/redo must not interleave, e.g. when ⌘Z is held down.
   const serial = serialQueue();
 
-  const applyToSelection = (action: Action) =>
-    serial(async () => {
-      const editor = vscode.window.activeTextEditor;
-      if (!editor) {
-        return;
-      }
-      const doc = editor.document;
-      status.showBusy(action);
+  /** Stages or unstages the active editor's selection, or what the companion asks for. */
+  const applyToSelection = (action: Action, request?: ApplyRequest): Promise<ApplyResponse['outcome']> => {
+    const doc = request ? documentFor(request.uri) : vscode.window.activeTextEditor?.document;
+    if (!doc) {
+      return Promise.resolve('unavailable');
+    }
+    const editor = editorFor(doc);
+    const ranges = request?.ranges ?? (editor ? selectedRanges(editor) : []);
+    const paint = (where: { lines: LineRange[]; gaps: number[] }, replacing?: Flash) =>
+      editor && !request?.painted ? highlight.show(editor, action, where, replacing) : undefined;
+    // Painted before anything is awaited, so the lines light up on the keypress itself.
+    const preview = tracker.peekPlan(doc, action, ranges);
+    let lit = preview && paint(preview);
+    status.showBusy(action);
+    return serial(async (): Promise<ApplyResponse['outcome']> => {
       try {
-        const outcome = await tracker.apply(doc, action, selectedRanges(editor), (plan) =>
-          highlight.show(editor, action, plan),
-        );
+        const outcome = await tracker.apply(doc, action, ranges, (plan) => {
+          lit = paint(plan, lit);
+        });
+        if (outcome.kind !== 'done') {
+          lit?.clear();
+        }
         switch (outcome.kind) {
           case 'done': {
-            highlight.fadeSoon();
+            lit?.fade();
             const { plan, location, transition } = outcome;
             const counts = formatCounts(plan);
             history.record(doc, {
@@ -68,6 +92,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
               lines: plan.lines,
               gaps: plan.gaps,
             });
+            stats.record(action, plan.added + plan.removed);
             flash(`$(check) ${action === 'stage' ? 'Staged' : 'Unstaged'} ${counts}`);
             break;
           }
@@ -78,14 +103,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             void vscode.window.showInformationMessage(outcome.reason);
             break;
         }
+        return outcome.kind;
       } catch (err) {
-        highlight.clear();
+        lit?.clear();
         log.error(`Failed to ${action} lines in ${doc.uri.fsPath}: ${errorMessage(err)}`);
         void vscode.window.showErrorMessage(`Couldn't ${action} the selection: ${errorMessage(err)}`);
+        return 'failed';
       } finally {
         status.refresh();
       }
     });
+  };
+
+  const applyForCompanion = async (request: ApplyRequest): Promise<ApplyResponse> => {
+    const outcome = await applyToSelection(request.action, request);
+    const doc = documentFor(request.uri);
+    const after = doc && (await tracker.getDiff(doc).catch(() => undefined));
+    return { outcome, snapshot: doc && after?.ok ? toFileSnapshot(doc.uri, after) : undefined };
+  };
 
   const travel = (direction: 'undo' | 'redo') =>
     serial(async () => {
@@ -98,18 +133,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       const [expected, next] = direction === 'undo' ? [entry.after, entry.before] : [entry.before, entry.after];
       const effect: Action = direction === 'redo' ? entry.action : entry.action === 'stage' ? 'unstage' : 'stage';
-      highlight.show(editor, effect, entry);
+      const lit = highlight.show(editor, effect, entry);
       try {
         await tracker.replaceEntry(doc.uri, entry.location, expected, next);
-        highlight.fadeSoon();
+        lit.fade();
         if (direction === 'undo') {
           history.markUndone(doc);
         } else {
           history.markRedone(doc);
         }
+        stats.record('undo', 0);
         flash(`$(check) ${direction === 'undo' ? 'Undid' : 'Redid'} ${entry.label}`);
       } catch (err) {
-        highlight.clear();
+        lit.clear();
         history.clear(doc.uri.fsPath);
         log.warn(`Failed to ${direction} ${entry.label} in ${doc.uri.fsPath}: ${errorMessage(err)}`);
         void vscode.window.showWarningMessage(`Couldn't ${direction} ${entry.label}: ${errorMessage(err)}`);
@@ -122,9 +158,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     history,
     status,
     highlight,
+    companion,
     new HistoryContext(history),
+    stats,
+    statsPanel,
+    vscode.commands.registerCommand('chunkStage.showStats', () => statsPanel.show()),
     vscode.commands.registerCommand('chunkStage.stageSelection', () => applyToSelection('stage')),
     vscode.commands.registerCommand('chunkStage.unstageSelection', () => applyToSelection('unstage')),
+    vscode.commands.registerCommand(MAIN_APPLY_COMMAND, applyForCompanion),
+    vscode.commands.registerCommand(MAIN_HELLO_COMMAND, () => {
+      companion.connected();
+      status.refresh();
+      return true;
+    }),
     vscode.commands.registerCommand('chunkStage.undo', () => travel('undo')),
     vscode.commands.registerCommand('chunkStage.redo', () => travel('redo')),
     vscode.workspace.onDidChangeTextDocument((e) => {
@@ -138,7 +184,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         refreshSoon();
       }
     }),
-    vscode.workspace.onDidCloseTextDocument((doc) => tracker.forget(doc.uri)),
+    vscode.workspace.onDidCloseTextDocument((doc) => {
+      tracker.forget(doc.uri);
+      // Like the editor's own undo; a reopened document also restarts its version numbers.
+      history.clear(doc.uri.fsPath);
+    }),
     { dispose: () => refreshSoon.cancel() },
   );
   if (gitApi) {
@@ -154,14 +204,21 @@ export function deactivate(): void {}
  * for the active file.
  */
 class SelectionStatus implements vscode.Disposable {
-  private readonly stageButton = new PlanButton('chunkStage.stage', 'stage', 'chunkStage.stageSelection', 102);
-  private readonly unstageButton = new PlanButton('chunkStage.unstage', 'unstage', 'chunkStage.unstageSelection', 101);
+  private readonly stageButton: PlanButton;
+  private readonly unstageButton: PlanButton;
   private readonly schedule = debounce(() => void this.update(), 40);
   private readonly subscriptions: vscode.Disposable[];
   private readonly contextValues = new Map<string, boolean>();
   private generation = 0;
 
-  constructor(private readonly tracker: ChangeTracker) {
+  constructor(
+    private readonly tracker: ChangeTracker,
+    private readonly companion: CompanionLink,
+  ) {
+    // Clicks go through the companion when it's there, so it can paint the highlight locally.
+    const command = (action: Action, main: string) => () => (companion.active ? COMPANION_APPLY_COMMANDS[action] : main);
+    this.stageButton = new PlanButton('chunkStage.stage', 'stage', command('stage', 'chunkStage.stageSelection'), 102);
+    this.unstageButton = new PlanButton('chunkStage.unstage', 'unstage', command('unstage', 'chunkStage.unstageSelection'), 101);
     this.subscriptions = [
       vscode.window.onDidChangeActiveTextEditor(() => this.schedule(0)),
       vscode.window.onDidChangeTextEditorSelection((e) => {
@@ -212,6 +269,7 @@ class SelectionStatus implements vscode.Disposable {
         if (result.version !== editor.document.version) {
           return;
         }
+        this.companion.send(editor.document.uri, result);
         const ranges = selectedRanges(editor);
         hasUnstaged = result.unstaged.changes.length > 0;
         hasStaged = (result.staged?.changes.length ?? 0) > 0;
@@ -271,93 +329,76 @@ class HistoryContext implements vscode.Disposable {
   }
 }
 
-/** How long the highlight stays after a write has landed. */
-const HIGHLIGHT_LINGER_MS = 1000;
-
 /**
- * Tints the lines being staged (green) or unstaged (amber) the moment the
- * action starts, so the editor reacts right away even while git, the network
- * and the gutter catch up. Lines that only exist in the other version show as
- * a thin bar where they were.
+ * The main extension's end of the link to the companion (see protocol.ts):
+ * keeps it supplied with the active file's index and HEAD versions.
  */
-class ChangeHighlight implements vscode.Disposable {
-  private readonly types: Record<Action, { lines: vscode.TextEditorDecorationType; above: vscode.TextEditorDecorationType; below: vscode.TextEditorDecorationType }>;
-  private shown: { editor: vscode.TextEditor; action: Action } | undefined;
-  private timer: NodeJS.Timeout | undefined;
+class CompanionLink implements vscode.Disposable {
+  private lastSent: string | undefined;
 
-  constructor() {
-    const typesFor = (color: vscode.ThemeColor) => ({
-      lines: vscode.window.createTextEditorDecorationType({ isWholeLine: true, backgroundColor: color }),
-      above: vscode.window.createTextEditorDecorationType({
-        isWholeLine: true,
-        borderColor: color,
-        borderStyle: 'solid',
-        borderWidth: '2px 0 0 0',
-      }),
-      below: vscode.window.createTextEditorDecorationType({
-        isWholeLine: true,
-        borderColor: color,
-        borderStyle: 'solid',
-        borderWidth: '0 0 2px 0',
-      }),
+  private constructor(public active: boolean) {}
+
+  static async connect(): Promise<CompanionLink> {
+    // Only remote windows need it; locally this extension already runs next to the editor.
+    const found = isRemote() && (await vscode.commands.getCommands(true)).includes(COMPANION_SNAPSHOT_COMMAND);
+    return new CompanionLink(found);
+  }
+
+  /** The companion started after this extension did. */
+  connected(): void {
+    this.active = isRemote();
+    this.lastSent = undefined;
+  }
+
+  send(uri: vscode.Uri, snapshot: Snapshot): void {
+    if (!this.active) {
+      return;
+    }
+    const key = [uri.toString(), JSON.stringify(snapshot.state), snapshot.bom, snapshot.staged !== undefined].join('\0');
+    if (key === this.lastSent) {
+      return;
+    }
+    this.lastSent = key;
+    vscode.commands.executeCommand(COMPANION_SNAPSHOT_COMMAND, toFileSnapshot(uri, snapshot)).then(undefined, async () => {
+      // Resend next time; give up on the companion only if it's really gone.
+      this.lastSent = undefined;
+      this.active = (await vscode.commands.getCommands(true)).includes(COMPANION_SNAPSHOT_COMMAND);
     });
-    this.types = {
-      stage: typesFor(new vscode.ThemeColor('chunkStage.stagedLinesBackground')),
-      unstage: typesFor(new vscode.ThemeColor('chunkStage.unstagedLinesBackground')),
-    };
   }
 
-  show(editor: vscode.TextEditor, action: Action, where: { lines: LineRange[]; gaps: number[] }): void {
-    this.clear();
-    const lastLine = editor.document.lineCount - 1;
-    const line = (n: number) => new vscode.Range(n, 0, n, 0);
-    const types = this.types[action];
-    editor.setDecorations(
-      types.lines,
-      where.lines.map((r) => new vscode.Range(r.start, 0, Math.min(r.end, lastLine), 0)),
-    );
-    editor.setDecorations(types.above, where.gaps.filter((gap) => gap <= lastLine).map(line));
-    editor.setDecorations(types.below, where.gaps.some((gap) => gap > lastLine) ? [line(lastLine)] : []);
-    this.shown = { editor, action };
-  }
-
-  fadeSoon(): void {
-    clearTimeout(this.timer);
-    this.timer = setTimeout(() => this.clear(), HIGHLIGHT_LINGER_MS);
-  }
-
-  clear(): void {
-    clearTimeout(this.timer);
-    if (this.shown) {
-      const { editor, action } = this.shown;
-      Object.values(this.types[action]).forEach((type) => editor.setDecorations(type, []));
-      this.shown = undefined;
-    }
-  }
-
-  dispose(): void {
-    this.clear();
-    for (const types of Object.values(this.types)) {
-      Object.values(types).forEach((type) => type.dispose());
-    }
-  }
+  dispose(): void {}
 }
 
-/** A status bar button for one action; its tooltip says how many lines it would stage or unstage. */
+function toFileSnapshot(uri: vscode.Uri, { state, bom, unstaged, staged }: Snapshot): FileSnapshot {
+  return { uri, state, bom, indexText: unstaged.oldLines.join(''), headText: staged?.newLines.join('') };
+}
+
+function isRemote(): boolean {
+  return vscode.env.remoteName !== undefined;
+}
+
+function documentFor(uri: vscode.Uri): vscode.TextDocument | undefined {
+  const key = vscode.Uri.from(uri).toString();
+  return vscode.workspace.textDocuments.find((doc) => doc.uri.toString() === key);
+}
+
+function editorFor(doc: vscode.TextDocument): vscode.TextEditor | undefined {
+  const active = vscode.window.activeTextEditor;
+  return active?.document === doc ? active : vscode.window.visibleTextEditors.find((e) => e.document === doc);
+}
+
+/** A status bar button for one action, saying how many lines it would stage or unstage. */
 class PlanButton implements vscode.Disposable {
   private readonly item: vscode.StatusBarItem;
-  private readonly title: string;
 
   constructor(
     id: string,
     private readonly action: Action,
-    command: string,
+    private readonly command: () => string,
     priority: number,
   ) {
-    this.title = action === 'stage' ? 'Stage selected lines' : 'Unstage selected lines';
     this.item = vscode.window.createStatusBarItem(id, vscode.StatusBarAlignment.Right, priority);
-    this.item.name = this.title;
-    this.item.command = command;
+    this.item.name = action === 'stage' ? 'Stage selected lines' : 'Unstage selected lines';
   }
 
   show(plan: Plan | undefined): void {
@@ -365,8 +406,8 @@ class PlanButton implements vscode.Disposable {
       this.item.hide();
       return;
     }
-    this.item.text = `${ICON} ${this.action === 'stage' ? 'Stage' : 'Unstage'}`;
-    this.item.tooltip = `${this.title}: ${formatCounts(plan)}`;
+    this.item.command = this.command();
+    this.item.text = `${ICON} ${this.action === 'stage' ? 'Stage' : 'Unstage'} ${formatCounts(plan)}`;
     this.item.show();
   }
 
@@ -377,15 +418,6 @@ class PlanButton implements vscode.Disposable {
   dispose(): void {
     this.item.dispose();
   }
-}
-
-/** Selected editor lines; an empty selection means the cursor's line. */
-function selectedRanges(editor: vscode.TextEditor): LineRange[] {
-  return editor.selections.map((selection) => {
-    // A selection ending at column 0 doesn't include that line.
-    const endsAtLineStart = !selection.isEmpty && selection.end.character === 0 && selection.end.line > selection.start.line;
-    return { start: selection.start.line, end: selection.end.line - (endsAtLineStart ? 1 : 0) };
-  });
 }
 
 function flash(message: string): void {
@@ -453,8 +485,8 @@ function watchRepositories(api: GitApi, onChange: () => void): vscode.Disposable
   return { dispose: () => subscriptions.forEach((s) => s.dispose()) };
 }
 
-function serialQueue(): (task: () => Promise<void>) => Promise<void> {
-  let tail: Promise<void> = Promise.resolve();
+function serialQueue(): <T>(task: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve();
   return (task) => {
     const run = tail.then(task);
     tail = run.catch(() => undefined);

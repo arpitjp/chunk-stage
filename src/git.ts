@@ -203,10 +203,20 @@ export class Git {
     }
   }
 
-  /** Polls the index until `isDone` accepts the file's entry, for writes made by another process. */
-  async waitForEntry(location: InRepo, isDone: (entry: BlobRef | null) => boolean, timeoutMs = 3000): Promise<BlobRef | null> {
+  /**
+   * Polls the index until `isDone` accepts the file's entry, for writes made by
+   * another process. Gives up quietly with null once `signal` is aborted.
+   */
+  async waitForEntry(
+    location: InRepo,
+    isDone: (entry: BlobRef | null) => boolean,
+    { timeoutMs = 3000, signal }: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<BlobRef | null> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
+      if (signal?.aborted) {
+        return null;
+      }
       const current = await this.indexEntry(location);
       if (current !== 'conflict' && isDone(current)) {
         return current;

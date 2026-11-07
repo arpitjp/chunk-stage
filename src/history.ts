@@ -14,8 +14,14 @@ export interface HistoryEntry {
   /** Where the operation showed in the editor; still valid whenever the entry can be undone or redone. */
   lines: LineRange[];
   gaps: number[];
-  /** Fingerprint of the editor text when the operation happened. */
-  textHash: string;
+  /** The editor text when the operation happened: its version, length and fingerprint. */
+  text: TextStamp;
+}
+
+interface TextStamp {
+  version: number;
+  length: number;
+  hash: string;
 }
 
 const MAX_ENTRIES_PER_FILE = 100;
@@ -36,9 +42,10 @@ export class StageHistory implements vscode.Disposable {
 
   readonly onDidChange = this.emitter.event;
 
-  record(doc: vscode.TextDocument, entry: Omit<HistoryEntry, 'textHash'>): void {
+  record(doc: vscode.TextDocument, entry: Omit<HistoryEntry, 'text'>): void {
     const stack = stackFor(this.undoStacks, doc.uri.fsPath);
-    stack.push({ ...entry, textHash: fingerprint(doc) });
+    const text = doc.getText();
+    stack.push({ ...entry, text: { version: doc.version, length: text.length, hash: fingerprint(text) } });
     if (stack.length > MAX_ENTRIES_PER_FILE) {
       stack.shift();
     }
@@ -112,9 +119,18 @@ function stackFor(stacks: Map<string, HistoryEntry[]>, key: string): HistoryEntr
 function peekMatching(stacks: Map<string, HistoryEntry[]>, doc: vscode.TextDocument): HistoryEntry | undefined {
   const stack = stacks.get(doc.uri.fsPath);
   const top = stack?.[stack.length - 1];
-  return top && top.textHash === fingerprint(doc) ? top : undefined;
+  return top && sameText(top.text, doc) ? top : undefined;
 }
 
-function fingerprint(doc: vscode.TextDocument): string {
-  return createHash('sha1').update(doc.getText()).digest('base64');
+/** Checked on every keystroke, so the full-text hash is the last resort. */
+function sameText(stamp: TextStamp, doc: vscode.TextDocument): boolean {
+  if (doc.version === stamp.version) {
+    return true;
+  }
+  const text = doc.getText();
+  return text.length === stamp.length && fingerprint(text) === stamp.hash;
+}
+
+function fingerprint(text: string): string {
+  return createHash('sha1').update(text).digest('base64');
 }

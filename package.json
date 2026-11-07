@@ -31,27 +31,33 @@
   "activationEvents": [
     "onStartupFinished"
   ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "extensionPack": [
+    "arpitjp.chunk-stage-companion"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "colors": [
       {
         "id": "chunkStage.stagedLinesBackground",
-        "description": "Highlight on lines while they are being staged, and briefly after.",
+        "description": "Tint of lines being staged, shown right away and briefly after the change lands. The accent bar on the left uses the same hue, stronger.",
         "defaults": {
-          "dark": "#3fb9504d",
-          "light": "#1a7f3733",
-          "highContrast": "#3fb95080",
-          "highContrastLight": "#1a7f3759"
+          "dark": "#2fbf6b3d",
+          "light": "#1f9d552b",
+          "highContrast": "#3fdc8466",
+          "highContrastLight": "#0e7a3d4d"
         }
       },
       {
         "id": "chunkStage.unstagedLinesBackground",
-        "description": "Highlight on lines while they are being unstaged, and briefly after.",
+        "description": "Tint of lines being unstaged, shown right away and briefly after the change lands. The accent bar on the left uses the same hue, stronger.",
         "defaults": {
-          "dark": "#d299224d",
-          "light": "#9a670033",
-          "highContrast": "#d2992280",
-          "highContrastLight": "#9a670059"
+          "dark": "#f5525a38",
+          "light": "#cf222e26",
+          "highContrast": "#ff6b7066",
+          "highContrastLight": "#a40e2647"
         }
       }
     ],
@@ -80,6 +86,10 @@
       {
         "command": "chunkStage.redo",
         "title": "Chunk: Redo Stage/Unstage"
+      },
+      {
+        "command": "chunkStage.showStats",
+        "title": "Chunk: Show Stats"
       }
     ],
     "menus": {
@@ -119,13 +129,13 @@
         "command": "chunkStage.stageSelection",
         "key": "ctrl+alt+shift+s",
         "mac": "ctrl+shift+s",
-        "when": "editorTextFocus && chunkStage.hasUnstaged"
+        "when": "editorTextFocus && chunkStage.hasUnstaged && !chunkStage.companion"
       },
       {
         "command": "chunkStage.unstageSelection",
         "key": "ctrl+alt+shift+u",
         "mac": "ctrl+shift+u",
-        "when": "editorTextFocus && chunkStage.hasStaged"
+        "when": "editorTextFocus && chunkStage.hasStaged && !chunkStage.companion"
       },
       {
         "command": "chunkStage.undo",
@@ -154,7 +164,8 @@
     "build:icon": "node scripts/build-icon-font.js",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test out/test/*.test.js",
-    "package": "vsce package"
+    "package": "node scripts/package.js",
+    "deploy": "node scripts/install.js"
   },
   "devDependencies": {
     "@types/node": "^18.19.0",

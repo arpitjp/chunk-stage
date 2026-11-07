@@ -120,9 +120,28 @@ test('unstage takes exactly the selected lines, without blank lines around them'
   assert.equal(result(s, 'unstage', 2, 2), text('a', '', '', 'c'));
 });
 
-test('stage plans say which editor lines and gaps they touch, snapped blank lines included', () => {
+test('the last stage also takes blank lines left elsewhere in the file', () => {
+  const s = snapshot('', text('a', 'b', 'c'), text('a', '', 'b', 'x', 'c', ''), tracked);
+  assert.equal(result(s, 'stage', 3, 3), text('a', '', 'b', 'x', 'c', ''));
+  assert.equal(formatCounts(planFor(s, 'stage', [{ start: 3, end: 3 }])!), '+1');
+  // Not while other changes are still unstaged.
+  const partial = snapshot('', text('a', 'b', 'c'), text('a', '', 'y', 'b', 'x', 'c'), tracked);
+  assert.equal(result(partial, 'stage', 4, 4), text('a', 'b', 'x', 'c'));
+});
+
+test('the last stage leaves a partly staged block alone when real lines of it remain', () => {
+  const s = snapshot('', text('a', 'c'), text('a', 'x', 'y', 'c', ''), tracked);
+  assert.equal(result(s, 'stage', 1, 1), text('a', 'x', 'c'));
+});
+
+test('the last stage also takes a missing final newline', () => {
+  const s = snapshot('', 'a\nb\nc', 'a\nx\nb\nc\n', tracked);
+  assert.equal(result(s, 'stage', 1, 1), 'a\nx\nb\nc\n');
+});
+
+test('stage plans say which editor lines and gaps they touch, snapped blank lines excluded', () => {
   const added = planFor(snapshot('', text('a', 'c'), text('a', '', 'b', '', 'c'), tracked), 'stage', [{ start: 2, end: 2 }]);
-  assert.deepEqual(added && { lines: added.lines, gaps: added.gaps }, { lines: [{ start: 1, end: 3 }], gaps: [] });
+  assert.deepEqual(added && { lines: added.lines, gaps: added.gaps }, { lines: [{ start: 2, end: 2 }], gaps: [] });
 
   const index = text('a', 'b', 'c', 'd');
   const removed = planFor(snapshot(index, index, text('a', 'd')), 'stage', [{ start: 0, end: 1 }]);

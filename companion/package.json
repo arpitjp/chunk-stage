@@ -1,0 +1,46 @@
+{
+  "name": "chunk-stage-companion",
+  "displayName": "Chunk Stage (local companion)",
+  "description": "Makes Chunk Stage's highlight appear instantly in Remote SSH, WSL and container windows. Installed automatically with Chunk Stage.",
+  "version": "0.1.0",
+  "publisher": "arpitjp",
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/arpitjp/chunk-stage.git"
+  },
+  "bugs": {
+    "url": "https://github.com/arpitjp/chunk-stage/issues"
+  },
+  "homepage": "https://github.com/arpitjp/chunk-stage#readme",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "main": "./out/companion.js",
+  "contributes": {
+    "keybindings": [
+      {
+        "command": "chunkStage.companion.stageSelection",
+        "key": "ctrl+alt+shift+s",
+        "mac": "ctrl+shift+s",
+        "when": "editorTextFocus && chunkStage.hasUnstaged && chunkStage.companion"
+      },
+      {
+        "command": "chunkStage.companion.unstageSelection",
+        "key": "ctrl+alt+shift+u",
+        "mac": "ctrl+shift+u",
+        "when": "editorTextFocus && chunkStage.hasStaged && chunkStage.companion"
+      }
+    ]
+  }
+}

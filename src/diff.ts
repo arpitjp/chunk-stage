@@ -267,6 +267,21 @@ export function summarize(pieces: Piece[]): { added: number; removed: number } {
   return { added, removed };
 }
 
+/**
+ * Whether a change only adds, removes or edits blank lines, or only adds or
+ * removes a final line terminator.
+ */
+export function isTrivialChange(change: Change): boolean {
+  const isBlank = (line: string) => line.trim() === '';
+  if (change.oldLines.every(isBlank) && change.newLines.every(isBlank)) {
+    return true;
+  }
+  return (
+    change.oldLines.length === change.newLines.length &&
+    change.oldLines.every((line, k) => stripEol(line) === stripEol(change.newLines[k]))
+  );
+}
+
 function inOrder(pieces: Piece[]): Array<{ piece: Piece; order: number }> {
   return pieces
     .map((piece, order) => ({ piece, order }))
