@@ -1,0 +1,164 @@
+{
+  "name": "chunk-stage",
+  "displayName": "Chunk Stage",
+  "description": "Stage or unstage just the lines you selected, including in brand-new files. Undo with ⌘Z.",
+  "version": "0.1.0",
+  "publisher": "arpit-jain",
+  "icon": "images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/arpitjp/chunk-stage.git"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "keywords": [
+    "git",
+    "stage",
+    "hunk",
+    "partial",
+    "review"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "colors": [
+      {
+        "id": "chunkStage.stagedLinesBackground",
+        "description": "Highlight on lines while they are being staged, and briefly after.",
+        "defaults": {
+          "dark": "#3fb9504d",
+          "light": "#1a7f3733",
+          "highContrast": "#3fb95080",
+          "highContrastLight": "#1a7f3759"
+        }
+      },
+      {
+        "id": "chunkStage.unstagedLinesBackground",
+        "description": "Highlight on lines while they are being unstaged, and briefly after.",
+        "defaults": {
+          "dark": "#d299224d",
+          "light": "#9a670033",
+          "highContrast": "#d2992280",
+          "highContrastLight": "#9a670059"
+        }
+      }
+    ],
+    "icons": {
+      "chunk-stage": {
+        "description": "Chunk Stage",
+        "default": {
+          "fontPath": "media/chunk-stage.ttf",
+          "fontCharacter": "\\E900"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "chunkStage.stageSelection",
+        "title": "Chunk: Stage Selected Lines"
+      },
+      {
+        "command": "chunkStage.unstageSelection",
+        "title": "Chunk: Unstage Selected Lines"
+      },
+      {
+        "command": "chunkStage.undo",
+        "title": "Chunk: Undo Stage/Unstage"
+      },
+      {
+        "command": "chunkStage.redo",
+        "title": "Chunk: Redo Stage/Unstage"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "chunkStage.stageSelection",
+          "when": "chunkStage.hasUnstaged",
+          "group": "0_chunkStage@1"
+        },
+        {
+          "command": "chunkStage.unstageSelection",
+          "when": "chunkStage.hasStaged",
+          "group": "0_chunkStage@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "chunkStage.stageSelection",
+          "when": "chunkStage.hasUnstaged"
+        },
+        {
+          "command": "chunkStage.unstageSelection",
+          "when": "chunkStage.hasStaged"
+        },
+        {
+          "command": "chunkStage.undo",
+          "when": "false"
+        },
+        {
+          "command": "chunkStage.redo",
+          "when": "false"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "chunkStage.stageSelection",
+        "key": "ctrl+alt+shift+s",
+        "mac": "ctrl+shift+s",
+        "when": "editorTextFocus && chunkStage.hasUnstaged"
+      },
+      {
+        "command": "chunkStage.unstageSelection",
+        "key": "ctrl+alt+shift+u",
+        "mac": "ctrl+shift+u",
+        "when": "editorTextFocus && chunkStage.hasStaged"
+      },
+      {
+        "command": "chunkStage.undo",
+        "key": "ctrl+z",
+        "mac": "cmd+z",
+        "when": "editorTextFocus && chunkStage.canUndo"
+      },
+      {
+        "command": "chunkStage.redo",
+        "key": "ctrl+shift+z",
+        "mac": "cmd+shift+z",
+        "when": "editorTextFocus && chunkStage.canRedo"
+      },
+      {
+        "command": "chunkStage.redo",
+        "key": "ctrl+y",
+        "mac": "cmd+shift+z",
+        "when": "editorTextFocus && chunkStage.canRedo"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run clean && npm run compile",
+    "clean": "node -e \"require('fs').rmSync('out', { recursive: true, force: true })\"",
+    "compile": "tsc -p ./",
+    "build:icon": "node scripts/build-icon-font.js",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test out/test/*.test.js",
+    "package": "vsce package --skip-license"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "1.80.0",
+    "@vscode/vsce": "2.24.0",
+    "svg2ttf": "^6.1.0",
+    "typescript": "^5.4.0"
+  },
+  "overrides": {
+    "cheerio": "1.0.0-rc.12"
+  }
+}
